@@ -1,0 +1,508 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Star-Streak</title>
+    <meta charset="utf-8">
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            background: #1a1a1a;
+            font-family: Arial, sans-serif;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+        }
+    canvas {
+      border: 3px solid #fff;
+      box-shadow: 0 0 30px rgba(0, 0, 0, 0.6);
+    }
+
+    #hud {
+      margin-top: 10px;
+      opacity: 0.85;
+      font-size: 14px;
+    }
+  </style>
+</head>
+
+<body>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.4.0/p5.min.js"></script>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/2.0.3/socket.io.js"></script>
+
+  <script>
+    //movement, camera, trails, colors, star generation background, area
+    let starX, starY;
+    let camX = 0, camY = 0;
+    let trail = [];
+    let colors = [];
+    let bgStars = [];
+    let starArea = 2000;
+
+    // Multiplayer
+    let socket;
+    let otherPlayers = [];
+    let playerId;
+    let username = "";
+    let isConnected = false;
+
+    // Spawn Stars
+    let collectibles = [];
+    let collectedCount = 0;
+    let collectibleInterval = 100;
+    let lastCollectibleFrame = 0;
+    let lanes = [-300, -200, -100, 0, 100, 200, 300];
+
+    // Asteroids
+    let asteroids = [];
+    let asteroidInterval = 100;
+    let lastAsteroidWaveTime = 0;
+    let asteroidWaveInterval = 60;
+    let waveWarning = false; // Asteroid wave
+    let waveWarningStart = 0;
+    let cameraShake = 0;
+
+    // Boost
+    let boosting = false;
+    let boostDuration = 3;
+    let boostTimer = 0;
+    let boostCooldown = 30;
+    let lastBoostTime = -boostCooldown;
+    let normalSpeed = 0.04;
+    let boostSpeed = 0.12 * 0.3;
+
+    // Game state
+    let gameStarted = false;
+
+    // High score
+    let topScore = 0;
+    // Load saved top score from previous sessions
+    if (localStorage.getItem("topScore")) {
+    topScore = parseInt(localStorage.getItem("topScore"));
+    }
+
+    function setup() {
+    createCanvas(800, 800);
+
+    //color of the stars trail
+    colors = [
+        color("#FFFF8F"),
+        color("#FFFF6E"),
+        color("#FFFF4D"),
+        color("#FFFF2B"),
+        color("#FFFF00")
+    ];
+
+    // Background stars
+    for (let i = 0; i < 500; i++) {
+        bgStars.push(createStar(random(-starArea, starArea), random(-starArea, starArea)));
+    }
+
+    //username
+    username = prompt("Name for your star?");
+    if (username == null || username.trim() === "") {
+        username = "Player" + Math.floor(random(1000));
+    }
+
+    //the generation of collectable stars
+    let startLane = random(lanes);
+    starX = width / 2 + startLane;
+    starY = height - 50;
+    gameStarted = true;
+
+    // Multiplayer setup
+    socket = io();
+    playerId = Math.floor(random(1000000));
+
+    socket.on("connect", () => {
+        playerId = socket.id;
+        isConnected = true;
+        console.log("Connected with ID:", playerId);
+    });
+
+    // Handle player data
+    socket.on("playerData", (payload) => {
+        try {
+        if (!payload) return;
+        let list;
+        if (Array.isArray(payload)) list = payload;
+        else if (typeof payload === "object") {
+            if (payload.id !== undefined && (payload.x !== undefined || payload.y !== undefined)) list = [payload];
+            else list = Object.values(payload);
+        } else return;
+
+        const incomingIds = new Set();
+        const meStr = String(playerId);
+
+        list.forEach((data) => {
+            if (!data || data.id === undefined) return;
+            const idStr = String(data.id);
+            if (idStr === meStr) return;
+
+            incomingIds.add(idStr);
+            let existing = otherPlayers.find(p => String(p.id) === idStr);
+
+            if (!existing) {
+            otherPlayers.push({
+                id: data.id,
+                x: data.x ?? 0,
+                y: data.y ?? 0,
+                targetX: data.x ?? 0,
+                targetY: data.y ?? 0,
+                smoothX: data.x ?? 0,
+                smoothY: data.y ?? 0,
+                collected: data.collected || 0,
+                username: data.username || "Player",
+                lastSeen: Date.now()
+            });
+            } else {
+            existing.x = data.x ?? existing.x;
+            existing.y = data.y ?? existing.y;
+            existing.targetX = data.x ?? existing.targetX;
+            existing.targetY = data.y ?? existing.targetY;
+            existing.collected = data.collected ?? existing.collected;
+            existing.username = data.username || existing.username;
+            existing.lastSeen = Date.now();
+            }
+        });
+
+        otherPlayers = otherPlayers.filter(p => incomingIds.has(String(p.id)));
+        } catch (err) {
+        console.error("Error in playerData handler:", err);
+        }
+    });
+
+    // Listen for other players hitting asteroids
+    socket.on("playerHitAsteroid", (data) => {
+        let p = otherPlayers.find(p => String(p.id) === String(data.id));
+        if (p) {
+        p.collected = data.collected;
+        }
+    });
+
+    socket.on("disconnected", (id) => {
+        otherPlayers = otherPlayers.filter((p) => p.id !== id);
+        console.log("Player disconnected:", id);
+    });
+
+    setInterval(() => {
+        if (isConnected) {
+        socket.emit("playerData", {
+            id: playerId,
+            x: starX,
+            y: starY,
+            collected: collectedCount,
+            username,
+            timestamp: Date.now()
+        });
+        }
+    }, 50);
+    }
+
+    function draw() {
+    background(14, 18, 105, 100);
+    if (!gameStarted) return;
+
+    // Remove ghosts of players not seen for 5 seconds
+    const now = Date.now();
+    otherPlayers = otherPlayers.filter(p => now - p.lastSeen < 5000);
+
+    let currentTime = millis() / 1000;
+    if (boosting && currentTime - boostTimer > boostDuration) boosting = false;
+
+    // Player movement
+    let targetX = starX;
+    let targetY = starY;
+    if (mouseIsPressed) {
+        targetX = mouseX + camX;
+        targetY = min(mouseY + camY, starY);
+    }
+
+    //boost
+    starX = lerp(starX, targetX, normalSpeed);
+    starY = lerp(starY, targetY, normalSpeed);
+    if (boosting) starY -= boostSpeed * height;
+
+    // Compute shake offsets BEFORE applying camera
+    let shakeX = 0;
+    let shakeY = 0;
+    if (cameraShake > 0.5) {
+        shakeX = random(-cameraShake, cameraShake);
+        shakeY = random(-cameraShake, cameraShake);
+        cameraShake *= 0.9; // slower fade out
+    }
+
+    // Smooth camera follows player
+    camX = lerp(camX, starX - width / 2, 0.1) - shakeX;
+    camY = lerp(camY, starY - height * 0.6, 0.1) - shakeY;
+
+    // Apply translation
+    push();
+    translate(-camX, -camY);
+
+    // Background stars
+    noStroke();
+    for (let i = bgStars.length - 1; i >= 0; i--) {
+        let s = bgStars[i];
+        s.brightness = 200 + 55 * sin(frameCount * s.twinkleSpeed + s.x);
+        fill(s.brightness);
+        circle(s.x, s.y, s.size);
+        if (dist(s.x, s.y, starX, starY) > starArea) bgStars.splice(i, 1);
+    }
+
+    while (bgStars.length < 500) {
+        let angle = random(TWO_PI);
+        let r = random(starArea);
+        bgStars.push(createStar(starX + cos(angle) * r, starY + sin(angle) * r));
+    }
+
+    // Collectibles
+    if (frameCount - lastCollectibleFrame > collectibleInterval) {
+        lastCollectibleFrame = frameCount;
+        let lineLength = 8;
+        let spacing = 30;
+        let lane = random(lanes);
+        let startX = starX + lane;
+        let startY = starY - 400;
+        for (let i = 0; i < lineLength; i++) {
+        collectibles.push({ x: startX, y: startY - i * spacing, size: 12, sparkleOffset: random(TWO_PI) });
+        }
+    }
+
+    //collectables stars
+    for (let i = collectibles.length - 1; i >= 0; i--) {
+        let cStar = collectibles[i];
+        push();
+        translate(cStar.x, cStar.y);
+        rotate(sin(frameCount * 0.1 + cStar.sparkleOffset) * 0.5);
+        fill(255, 255, 0);
+        noStroke();
+        starShape(0, 0, 4, 8, 5);
+        pop();
+
+        if (dist(starX, starY, cStar.x, cStar.y) < 20) {
+        collectedCount++;
+        collectibles.splice(i, 1);
+        if (collectedCount > topScore) {
+            topScore = collectedCount;
+            localStorage.setItem("topScore", topScore); // Save to browser
+        }
+        }
+    }
+
+    // Asteroids
+    if (frameCount % asteroidInterval === 0) {
+        let x = random(starX - 300, starX + 300);
+        let y = starY - 600;
+        let size = pow(random(), 2) * 120 + 15;//small,medium,large
+        let speed = map(size, 15, 135, 7, 2); // large = slower
+        asteroids.push({ x, y, size, speed });
+    }
+
+    for (let i = asteroids.length - 1; i >= 0; i--) {
+        let a = asteroids[i];
+        push();
+        translate(a.x, a.y);
+        noStroke();
+        for (let j = 0; j < 3; j++) {
+        fill(255, random(100, 200), 0, 150 - j * 50);
+        ellipse(0, 0, a.size - j * 8);
+        }
+        pop();
+
+        a.y += a.speed;
+
+        // --- Collision with local player ---
+        if (dist(starX, starY, a.x, a.y) < a.size / 2 + 10) {
+        collectedCount = 0; // reset local score
+        asteroids.splice(i, 1);
+
+        // Notify other players
+        if (isConnected) {
+            socket.emit("playerHitAsteroid", {
+            id: playerId,
+            collected: collectedCount
+            });
+        }
+
+        continue;
+        }
+
+        if (a.y - starY > 800) asteroids.splice(i, 1);
+    }
+
+    if (millis()/1000 - lastAsteroidWaveTime > asteroidWaveInterval) {
+        lastAsteroidWaveTime = millis()/1000;
+        for (let n = 0; n < 20; n++) {
+        let x = random(starX - 600, starX + 600);
+        let y = starY - 800 - random(0, 400);
+        let size = pow(random(), 2) * 120 + 15;
+        let speed = map(size, 15, 135, 7, 2);
+        asteroids.push({ x, y, size, speed });
+        }
+    }
+
+    //warning 3 secs before
+    if (!waveWarning && currentTime - lastAsteroidWaveTime > asteroidWaveInterval - 3) {
+        waveWarning = true;
+        waveWarningStart = currentTime;
+        console.log("⚠️ Asteroid wave incoming!");
+    }
+
+    // Asteroid Wave after 60 secs
+    if (currentTime - lastAsteroidWaveTime > asteroidWaveInterval) {
+        lastAsteroidWaveTime = currentTime;
+        waveWarning = false;
+
+        let numAsteroids = int(random(20, 40));
+        for (let n = 0; n < numAsteroids; n++) {
+        let x = random(starX - 700, starX + 700);
+        let y = starY - 900 - random(0, 400);
+        let size = pow(random(), 2) * 120 + 15;
+        let speed = map(size, 15, 135, 7, 2);
+        asteroids.push({ x, y, size, speed });
+        }
+
+        // Add a brief camera shake for dramatic effect
+        cameraShake = 60;
+    }
+
+    // flash screen
+    if (waveWarning) {
+        let flashAlpha = map(sin((currentTime - waveWarningStart) * 10), -1, 1, 50, 150);
+        fill(255, 50, 50, flashAlpha);
+        rect(0, 0, width, height);
+        fill(255);
+        textSize(32);
+        textAlign(CENTER, CENTER);
+        text("⚠️ ASTEROID WAVE INCOMING ⚠️", width / 2, height / 2);
+    }
+
+    // Star trail
+    trail.push({ x: starX, y: starY });
+    if (trail.length > 60) trail.shift();
+    noFill();
+    strokeWeight(6);
+    for (let i = 0; i < trail.length - 1; i++) {
+        let c = colors[(int(frameCount / 5) + i) % colors.length];
+        let alpha = map(i, 0, trail.length - 1, 0, 255);
+        stroke(red(c), green(c), blue(c), alpha * 0.4);
+        line(trail[i].x, trail[i].y, trail[i + 1].x, trail[i + 1].y);
+    }
+
+    // Main star
+    push();
+    translate(starX, starY);
+    rotate(frameCount / -100.0);
+    let c = colors[int(frameCount / 5) % colors.length];
+    fill(c);
+    noStroke();
+    starShape(0, 0, 8, 20, 5);
+    pop();
+
+    // Other players
+    for (let i = otherPlayers.length - 1; i >= 0; i--) {
+        let p = otherPlayers[i];
+        p.smoothX = lerp(p.smoothX ?? p.x, p.targetX ?? p.x, 0.2);
+        p.smoothY = lerp(p.smoothY ?? p.y, p.targetY ?? p.y, 0.2);
+
+        push();
+        translate(p.smoothX, p.smoothY);
+        fill(255, 0, 0);
+        noStroke();
+        starShape(0, 0, 8, 20, 5);
+        pop();
+
+        let d = dist(starX, starY, p.smoothX, p.smoothY);
+        if (d < 40 && d > 0) {
+        let dx = (starX - p.smoothX) / d;
+        let dy = (starY - p.smoothY) / d;
+        let force = map(d, 0, 40, 20, 0);
+        starX += dx * force;
+        starY += dy * force;
+        p.smoothX -= dx * (force * 0.8);
+        p.smoothY -= dy * (force * 0.8);
+        }
+    }
+
+    // Offscreen indicators
+    for (let p of otherPlayers) {
+        let sx = p.smoothX - camX;
+        let sy = p.smoothY - camY;
+        if (sx < 0 || sx > width || sy < 0 || sy > height) {
+        let angle = atan2(sy - height / 2, sx - width / 2);
+        let edgeX = width / 2 + cos(angle) * (width / 2 - 30);
+        let edgeY = height / 2 + sin(angle) * (height / 2 - 30);
+
+        push();
+        translate(edgeX + camX, edgeY + camY);
+        rotate(angle);
+        fill(255, 80, 80, 200);
+        noStroke();
+        triangle(0, 0, -10, -6, -10, 6);
+        pop();
+        }
+    }
+
+    pop();
+
+    // HUD
+    fill(255);
+    noStroke();
+    textSize(16);
+    let remaining = max(0, boostCooldown - (currentTime - lastBoostTime));
+    if (remaining > 0) text(`Boost ready in: ${remaining.toFixed(1)}s`, 10, 30);
+    else text(`Boost ready! Press SPACE`, 10, 30);
+    text(`Stars Collected: ${collectedCount}`, 10, 60);
+    text(`Top Score: ${topScore}`, 10, 90);
+
+    drawLeaderboard();
+    }
+
+    function drawLeaderboard() {
+    let allPlayers = [...otherPlayers, { id: playerId, x: starX, y: starY, collected: collectedCount, username }];
+    allPlayers.sort((a, b) => b.collected - a.collected);
+
+    fill(255);
+    textSize(16);
+    text("Leaderboard", width - 200, 30);
+    for (let i = 0; i < allPlayers.length && i < 5; i++) {
+        let p = allPlayers[i];
+        text(`${i + 1}. ${p.username}: ${p.collected}`, width - 200, 50 + i * 20);
+    }
+    }
+
+    function keyPressed() {
+    let currentTime = millis() / 1000;
+    if (key === " " && currentTime - lastBoostTime >= boostCooldown) {
+        boosting = true;
+        boostTimer = currentTime;
+        lastBoostTime = currentTime;
+    }
+    }
+
+    function createStar(x, y) {
+    return { x, y, size: random(1, 2), brightness: random(180, 255), twinkleSpeed: random(0.01, 0.05) };
+    }
+
+    function starShape(x, y, radius1, radius2, npoints) {
+    let angle = TWO_PI / npoints;
+    let halfAngle = angle / 2.0;
+    beginShape();
+    for (let a = 0; a < TWO_PI; a += angle) {
+        let sx = x + cos(a) * radius2;
+        let sy = y + sin(a) * radius2;
+        vertex(sx, sy);
+        sx = x + cos(a + halfAngle) * radius1;
+        sy = y + sin(a + halfAngle) * radius1;
+        vertex(sx, sy);
+    }
+    endShape(CLOSE);
+    }
+    </script>
+</body>
+</html>

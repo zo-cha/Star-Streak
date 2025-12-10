@@ -1,0 +1,13 @@
+{
+  "name": "star-streak",
+  "version": "1.0.0",
+  "description": "A competetive racing game where you compete for the collection of the stars. You dodge asteroids and boost to get ahead. An infinite space for infinite play.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.15.3",
+    "socket.io": "^2.0.3"
+  }
+}
